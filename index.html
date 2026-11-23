@@ -100,7 +100,7 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
 <div id="mapError">Nie udało się załadować mapy. Sprawdź internet w Safari i odśwież stronę.</div>
 <div class="top">
   <div class="search">
-    <div class="brand"><div class="logo">S</div>SINOLUX <span>TRUCK NAV</span><div class="test">TEST v0.2 • HGV</div></div>
+    <div class="brand"><div class="logo">S</div>SINOLUX <span>TRUCK NAV</span><div class="test">TEST v0.3 • HGV</div></div>
     <div class="fields">
       <div class="stacked">
         <label class="field"><span class="dot"></span><input id="from" placeholder="Start / miasto / postcode" value="Lincoln" autocomplete="street-address"></label>
@@ -155,7 +155,7 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
   'use strict';
   const $ = id => document.getElementById(id);
   const pre = {lincoln:[53.2307,-0.5406],birmingham:[52.4862,-1.8904],saxilby:[53.2676,-0.6644],manchester:[53.4808,-2.2426],felixstowe:[51.9617,1.3513],london:[51.5072,-0.1276],leeds:[53.8008,-1.5491],nottingham:[52.9548,-1.1581],liverpool:[53.4084,-2.9916],bristol:[51.4545,-2.5879],dover:[51.1279,1.3134],edinburgh:[55.9533,-3.1883]};
-  let map,route=null,routeLine=null,markers=[],gpsMarker=null,navMarker=null,watchId=null,demoTimer=null,mode='idle',lastSpoken=-1,lastFix=null,busy=false,routeToken=0,coordinates=[],steps=[],stepIndex=0,followGps=true;
+  let map,route=null,routeLine=null,markers=[],gpsMarker=null,navMarker=null,watchId=null,demoTimer=null,demoFrame=null,gpsFrame=null,mode='idle',lastSpoken=-1,lastFix=null,busy=false,routeToken=0,coordinates=[],steps=[],stepIndex=0,followGps=true,routeCum=[],lastCameraMove=0,lastGpsPoint=null,lastGpsTime=0;
   const tell = (message) => { $('message').textContent=message; };
   const setTag = (text) => { $('tag').textContent=text; };
   const noDrive = 'Wersja testowa. Nie używaj podczas prowadzenia HGV.';
@@ -163,9 +163,9 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
   function profile(){let p={};const ranges={height:[1,8],width:[1,5],length:[2,35],weight:[1,100],axle_load:[1,40],axle_count:[2,20]};for(const k in ranges){const v=Number($(k).value);if(!Number.isFinite(v)||v<ranges[k][0]||v>ranges[k][1])throw Error('Popraw parametr: '+k);p[k]=v;}p.axle_count=Math.round(p.axle_count);try{localStorage.setItem('sinoluxTruckProfile',JSON.stringify(p));}catch(e){}return p;}
   function initMap(){
     if(typeof window.L==='undefined'){$('mapError').style.display='block';return;}
-    map=L.map('map',{zoomControl:false,preferCanvas:true}).setView([53.2,-1.7],7);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
-    map.on('click',()=>{});
+    map=L.map('map',{zoomControl:false,preferCanvas:true,fadeAnimation:true,zoomAnimation:true,inertia:true,inertiaDeceleration:3000,markerZoomAnimation:false}).setView([53.2,-1.7],7);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,keepBuffer:2,updateWhenIdle:true,updateWhenZooming:false,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'}).addTo(map);
+    map.on('dragstart',()=>{if(mode==='gps'||mode==='demo'){followGps=false;$('routeNotice').textContent='Mapa przesunięta • ⌖ przywraca śledzenie';}});
     setTimeout(()=>map.invalidateSize(),200);
   }
   function showWholeRoute(){
@@ -179,10 +179,57 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
       map.setView([53.2,-1.7],7);
     }
   }
+  function buildDistanceIndex(points){
+    routeCum=new Array(points.length);
+    routeCum[0]=0;
+    for(let i=1;i<points.length;i++){
+      routeCum[i]=routeCum[i-1]+coordDistance(points[i-1],points[i]);
+    }
+  }
   function distanceOnRoute(first,last){
-    let total=0;
-    for(let i=Math.max(0,first);i<Math.min(coordinates.length-1,last);i++)total+=coordDistance(coordinates[i],coordinates[i+1]);
-    return total;
+    if(!routeCum.length)return 0;
+    return Math.max(0,routeCum[Math.min(routeCum.length-1,last)]-routeCum[Math.max(0,first)]);
+  }
+  function positionAtDistance(metres){
+    if(!routeCum.length)return null;
+    const total=routeCum[routeCum.length-1];
+    const d=Math.max(0,Math.min(total,metres));
+    let lo=0,hi=routeCum.length-1;
+    while(lo<hi){const mid=(lo+hi)>>1;if(routeCum[mid]<d)lo=mid+1;else hi=mid;}
+    const end=Math.max(1,lo);
+    const begin=end-1;
+    const span=Math.max(0.0001,routeCum[end]-routeCum[begin]);
+    const p=Math.min(1,Math.max(0,(d-routeCum[begin])/span));
+    const a=coordinates[begin],b=coordinates[end];
+    return {index:begin,pos:[a[0]+(b[0]-a[0])*p,a[1]+(b[1]-a[1])*p]};
+  }
+  function moveCamera(pos,intervalMs=700,animate=true){
+    if(!map||!followGps||document.visibilityState==='hidden')return;
+    const now=performance.now();
+    if(now-lastCameraMove<intervalMs)return;
+    lastCameraMove=now;
+    const c=map.getCenter();
+    if(map.distance(c,pos)<12)return;
+    map.panTo(pos,{animate,duration:animate?0.38:0,noMoveStart:true});
+  }
+  function smoothGpsMarker(pos){
+    if(gpsFrame!==null){cancelAnimationFrame(gpsFrame);gpsFrame=null;}
+    if(!gpsMarker){
+      gpsMarker=L.circleMarker(pos,{radius:8,color:'#fff',weight:3,fillColor:'#176ae6',fillOpacity:1}).addTo(map);
+      return;
+    }
+    const old=gpsMarker.getLatLng();
+    const delta=map.distance(old,pos);
+    if(delta<2)return;
+    const start=performance.now();
+    const duration=Math.min(850,Math.max(280,delta*13));
+    function frame(ts){
+      const f=Math.min(1,Math.max(0,(ts-start)/duration));
+      const ease=f*f*(3-2*f);
+      gpsMarker.setLatLng([old.lat+(pos[0]-old.lat)*ease,old.lng+(pos[1]-old.lng)*ease]);
+      if(f<1)gpsFrame=requestAnimationFrame(frame);else gpsFrame=null;
+    }
+    gpsFrame=requestAnimationFrame(frame);
   }
   function clearMap(){if(!map)return;if(routeLine){map.removeLayer(routeLine);routeLine=null;}markers.forEach(m=>map.removeLayer(m));markers=[];if(navMarker){map.removeLayer(navMarker);navMarker=null;}}
   function coordDistance(a,b){const lat1=a[0]*Math.PI/180,lat2=b[0]*Math.PI/180;const dlat=lat2-lat1,dlon=(b[1]-a[1])*Math.PI/180;const v=Math.sin(dlat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dlon/2)**2;return 6371000*2*Math.atan2(Math.sqrt(v),Math.sqrt(Math.max(0,1-v)));}
@@ -193,8 +240,8 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
     const ctl=new AbortController();const timer=setTimeout(()=>ctl.abort(),12000);
     try{const u='https://nominatim.openstreetmap.org/search?format=jsonv2&countrycodes=gb&limit=1&q='+encodeURIComponent(raw+', United Kingdom');const resp=await fetch(u,{signal:ctl.signal});if(!resp.ok)throw Error('Wyszukiwanie adresu niedostępne');const data=await resp.json();if(!data.length)throw Error('Nie znaleziono adresu: '+raw);return [Number(data[0].lat),Number(data[0].lon)];}finally{clearTimeout(timer);}
   }
-  function drawRoute(path){if(!map)return;clearMap();routeLine=L.polyline(path,{color:'#1670f7',weight:7,opacity:.92,lineJoin:'round'}).addTo(map);markers.push(L.circleMarker(path[0],{radius:9,weight:3,color:'#fff',fillColor:'#1a70e8',fillOpacity:1}).addTo(map));markers.push(L.circleMarker(path[path.length-1],{radius:9,weight:3,color:'#fff',fillColor:'#e04646',fillOpacity:1}).addTo(map));showWholeRoute();}
-  function stop(clearDemo){if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}if(demoTimer){clearInterval(demoTimer);demoTimer=null;}if('speechSynthesis' in window)window.speechSynthesis.cancel();mode='idle';$('start').textContent='▶ START GPS';$('start').classList.remove('stop');$('demo').disabled=false;document.body.classList.remove('route-focused','nav-active');$('routeNotice').classList.remove('bad');$('maneuver').style.display='none';$('speed').textContent='';if(clearDemo)tell('Prowadzenie testowe zakończone. '+noDrive);}
+  function drawRoute(path){if(!map)return;clearMap();routeLine=L.polyline(path,{color:'#1670f7',weight:7,opacity:.92,lineJoin:'round',smoothFactor:1.7}).addTo(map);markers.push(L.circleMarker(path[0],{radius:9,weight:3,color:'#fff',fillColor:'#1a70e8',fillOpacity:1}).addTo(map));markers.push(L.circleMarker(path[path.length-1],{radius:9,weight:3,color:'#fff',fillColor:'#e04646',fillOpacity:1}).addTo(map));showWholeRoute();}
+  function stop(clearDemo){if(window._stnWake){window._stnWake.release().catch(()=>{});window._stnWake=null;}if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}if(demoTimer){clearInterval(demoTimer);demoTimer=null;}if(demoFrame!==null){cancelAnimationFrame(demoFrame);demoFrame=null;}if(gpsFrame!==null){cancelAnimationFrame(gpsFrame);gpsFrame=null;}if('speechSynthesis' in window)window.speechSynthesis.cancel();mode='idle';$('start').textContent='▶ START GPS';$('start').classList.remove('stop');$('demo').disabled=false;document.body.classList.remove('route-focused','nav-active');$('routeNotice').classList.remove('bad');$('maneuver').style.display='none';$('speed').textContent='';if(clearDemo)tell('Prowadzenie testowe zakończone. '+noDrive);}
   async function findRoute(){
     if(busy)return;const token=++routeToken;stop(false);busy=true;$('routebtn').disabled=true;setTag('SZUKAM');tell('Szukam adresów i trasy HGV…');
     try{
@@ -209,12 +256,12 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
       let path=[],instructions=[];for(const leg of data.trip.legs){const offset=path.length;const sub=decodePolyline6(leg.shape);path.push(...sub);for(const m of leg.maneuvers||[]){instructions.push({index:offset+(m.begin_shape_index||0),text:m.instruction||m.verbal_pre_transition_instruction||'Kontynuuj drogą'});}}
       if(path.length<2)throw Error('Brak geometrii trasy.');if(token!==routeToken)return;
       route={path,steps:instructions,distance:Number(data.trip.summary?.length||0),time:Number(data.trip.summary?.time||0)};
-      coordinates=path;steps=instructions;drawRoute(path);setTag('HGV • TEST');
+      coordinates=path;steps=instructions;buildDistanceIndex(path);drawRoute(path);setTag('HGV • TEST');
       $('routeTitle').textContent=startName+' → '+endName;
       const km=route.distance.toFixed(1),mins=Math.round(route.time/60);
       $('routeBrief').textContent=km+' km · '+mins+' min • HGV TEST';tell(km+' km · '+mins+' min · wyznaczono trasę HGV. Nie zweryfikowano mostów i znaków. '+noDrive);
       $('maneuver').style.display='block';$('turn').textContent=(steps[0]?.text)||'Trasa HGV';$('turnDist').textContent='Podgląd wskazówek · jeszcze bez GPS';
-    }catch(e){if(token!==routeToken)return;route=null;coordinates=[];steps=[];clearMap();setTag('BRAK TRASY');$('routeBrief').textContent='Nie udało się wyznaczyć trasy HGV';tell('Nie udało się znaleźć trasy HGV: '+e.message+' START jest niedostępny do czasu znalezienia trasy.');}
+    }catch(e){if(token!==routeToken)return;route=null;coordinates=[];steps=[];routeCum=[];clearMap();setTag('BRAK TRASY');$('routeBrief').textContent='Nie udało się wyznaczyć trasy HGV';tell('Nie udało się znaleźć trasy HGV: '+e.message+' START jest niedostępny do czasu znalezienia trasy.');}
     finally{if(token===routeToken){busy=false;$('routebtn').disabled=false;}}
   }
   function speak(t){if(!('speechSynthesis' in window))return;try{window.speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.lang='pl-PL';u.rate=1;window.speechSynthesis.speak(u);}catch(e){}}
@@ -229,24 +276,90 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
     const remain=coordDistance(pos,coordinates[coordinates.length-1]);if(remain<35)tell('Dotarłeś w pobliże celu. Zatrzymaj test.');
   }
   function locationUpdate(p){
-    const pos=[p.coords.latitude,p.coords.longitude];lastFix=pos;
-    if(!map)return;const quality=Math.round(p.coords.accuracy||0);
-    if(!gpsMarker){gpsMarker=L.circleMarker(pos,{radius:8,color:'#fff',weight:3,fillColor:'#176ae6',fillOpacity:1}).addTo(map);}else gpsMarker.setLatLng(pos);
-    $('fromGps').disabled=false;if(mode==='gps'){if(followGps)map.setView(pos,Math.max(15,map.getZoom()),{animate:true});$('speed').textContent=(p.coords.speed!==null&&p.coords.speed>=0?(p.coords.speed*2.236936).toFixed(0)+' mph':'— mph')+' · dokładność GPS '+quality+' m';guide(pos,quality);}
-    else tell('GPS: dokładność około '+quality+' m. Naciśnij „Szukaj trasy HGV” lub START GPS.');
+    const pos=[p.coords.latitude,p.coords.longitude];
+    const quality=Math.round(p.coords.accuracy||0);
+    if(!map||!Number.isFinite(pos[0])||!Number.isFinite(pos[1]))return;
+    const stamp=p.timestamp||Date.now();
+    if(lastGpsPoint && stamp>lastGpsTime){
+      const travelled=coordDistance(lastGpsPoint,pos);
+      const elapsed=(stamp-lastGpsTime)/1000;
+      if(elapsed<5 && travelled>Math.max(400,elapsed*90+Math.max(quality,30)*2)){
+        tell('GPS zgłosił gwałtowny skok pozycji — ignoruję niepewny pomiar.');
+        return;
+      }
+    }
+    lastGpsPoint=pos;
+    lastGpsTime=stamp;
+    lastFix=pos;
+    $('fromGps').disabled=false;
+    if(quality<=100)smoothGpsMarker(pos);
+    if(mode==='gps'){
+      $('speed').textContent=(p.coords.speed!==null&&p.coords.speed>=0?(p.coords.speed*2.236936).toFixed(0)+' mph':'— mph')+' · GPS ±'+quality+' m';
+      if(quality>100){
+        tell('GPS ma niską dokładność ('+quality+' m) — wstrzymuję śledzenie kamery.');
+        return;
+      }
+      if(followGps)moveCamera(pos,750,true);
+      guide(pos,quality);
+    }else{
+      tell('GPS: dokładność około '+quality+' m. Naciśnij „Szukaj trasy HGV” lub START GPS.');
+    }
   }
   function startGPS(){
     if(!route){tell('Najpierw wybierz „Szukaj trasy HGV” i poczekaj na wynik.');return;}
     if(!navigator.geolocation){tell('Ta przeglądarka nie udostępnia GPS.');return;}
-    stop(false);mode='gps';followGps=true;lastSpoken=-1;setTag('GPS TEST');$('routeNotice').textContent='GPS TEST • aktywne śledzenie pozycji';$('start').textContent='■ STOP';$('start').classList.add('stop');$('demo').disabled=true;document.body.classList.add('route-focused','nav-active','sheet-compact');
+    stop(false);mode='gps';followGps=true;lastCameraMove=0;lastSpoken=-1;setTag('GPS TEST');$('routeNotice').textContent='GPS TEST • aktywne śledzenie pozycji';$('start').textContent='■ STOP';$('start').classList.add('stop');$('demo').disabled=true;document.body.classList.add('route-focused','nav-active','sheet-compact');
     tell('Uruchamiam GPS… Zezwól Safari na dostęp do położenia. '+noDrive);
     watchId=navigator.geolocation.watchPosition(locationUpdate,err=>{tell('Problem z GPS: '+err.message);stop(false);},{enableHighAccuracy:true,maximumAge:1500,timeout:14000});
     if(navigator.wakeLock?.request){navigator.wakeLock.request('screen').then(lock=>{window._stnWake=lock;}).catch(()=>{});}
   }
   function startDemo(){
-    if(!route){tell('Najpierw znajdź trasę HGV.');return;}
-    stop(false);mode='demo';followGps=true;lastSpoken=-1;setTag('SYMULACJA');$('routeNotice').textContent='SYMULACJA • nie jest to jazda GPS';$('start').textContent='■ STOP';$('start').classList.add('stop');document.body.classList.add('route-focused','nav-active','sheet-compact');$('demo').disabled=true;tell('SYMULACJA: punkt porusza się po trasie. To nie GPS ani prowadzenie ciężarówki.');
-    let i=0;const hop=Math.max(1,Math.floor(coordinates.length/115));demoTimer=setInterval(()=>{if(mode!=='demo')return;i=Math.min(coordinates.length-1,i+hop);const pos=coordinates[i];if(!navMarker)navMarker=L.circleMarker(pos,{radius:10,color:'#fff',weight:3,fillColor:'#158454',fillOpacity:1}).addTo(map);else navMarker.setLatLng(pos);map.panTo(pos,{animate:true});const next=steps.find(s=>s.index>=i);$('maneuver').style.display='block';$('turn').textContent=next?.text||'Kontynuuj';$('turnDist').textContent='SYMULACJA • nie pokazuje GPS';$('speed').textContent='SYMULACJA · brak rzeczywistej prędkości';if(i>=coordinates.length-1){stop(false);tell('Koniec demonstracji.');}},650);
+    if(!route||!routeCum.length){tell('Najpierw znajdź trasę HGV.');return;}
+    stop(false);
+    mode='demo';
+    followGps=true;
+    lastSpoken=-1;
+    lastCameraMove=0;
+    setTag('SYMULACJA');
+    $('routeNotice').textContent='SYMULACJA • nie jest to jazda GPS';
+    $('start').textContent='■ STOP';
+    $('start').classList.add('stop');
+    document.body.classList.add('route-focused','nav-active','sheet-compact');
+    $('demo').disabled=true;
+    tell('Płynna symulacja po niebieskiej trasie. Nie używaj do prowadzenia ciężarówki.');
+    const total=routeCum[routeCum.length-1];
+    const duration=Math.max(60000,Math.min(160000,total/0.9));
+    let elapsed=0,previous=0,lastMarker=0,lastText=0;
+    map.setView(coordinates[0],11,{animate:false});
+    navMarker=L.circleMarker(coordinates[0],{radius:10,color:'#fff',weight:3,fillColor:'#158454',fillOpacity:1}).addTo(map);
+    function tick(now){
+      if(mode!=='demo')return;
+      if(previous)elapsed+=Math.min(80,Math.max(0,now-previous));
+      previous=now;
+      if(now-lastMarker>32){
+        const at=positionAtDistance(total*Math.min(1,elapsed/duration));
+        if(at){
+          navMarker.setLatLng(at.pos);
+          if(followGps)moveCamera(at.pos,200,false);
+          if(now-lastText>700){
+            const next=steps.find(s=>s.index>=at.index);
+            $('maneuver').style.display='block';
+            $('turn').textContent=next?.text||'Kontynuuj';
+            $('turnDist').textContent='SYMULACJA • nie pokazuje GPS';
+            $('speed').textContent='Symulacja '+Math.round(elapsed/duration*100)+'% • bez GPS';
+            lastText=now;
+          }
+        }
+        lastMarker=now;
+      }
+      if(elapsed>=duration){
+        stop(false);
+        tell('Koniec płynnej symulacji. Wersja testowa.');
+        return;
+      }
+      demoFrame=requestAnimationFrame(tick);
+    }
+    demoFrame=requestAnimationFrame(tick);
   }
   $('swap').onclick=()=>{const x=$('from').value;$('from').value=$('to').value;$('to').value=x;};
   $('vehicleBtn').onclick=()=>{$('vehiclePanel').classList.toggle('open');};
@@ -257,8 +370,8 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
     if(!navigator.geolocation){tell('Brak obsługi GPS w tej przeglądarce.');return;}
     navigator.geolocation.getCurrentPosition(p=>{followGps=true;locationUpdate(p);if(map)map.setView([p.coords.latitude,p.coords.longitude],15);if(mode==='gps')$('routeNotice').textContent='Widok GPS • przycisk TRASA pokazuje pełną trasę';},e=>tell('GPS: '+e.message),{enableHighAccuracy:true,timeout:12000});
   };
-  $('zin').onclick=()=>map?.zoomIn();
-  $('zout').onclick=()=>map?.zoomOut();
+  $('zin').onclick=()=>{followGps=false;map?.zoomIn();};
+  $('zout').onclick=()=>{followGps=false;map?.zoomOut();};
   $('fit').onclick=showWholeRoute;
   $('quickFit').onclick=showWholeRoute;
   $('sheetToggle').onclick=()=>{
