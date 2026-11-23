@@ -90,6 +90,7 @@ body.sheet-hidden.nav-active #quickStop{display:block!important}
 #routeNotice{position:fixed;z-index:1010;top:calc(env(safe-area-inset-top) + 10px);left:10px;right:70px;max-width:440px;background:#fff;border:1px solid #e4edf5;border-radius:13px;padding:9px 12px;font-size:12px;font-weight:800;color:#1e578e;box-shadow:0 3px 16px #173e6130;display:none}
 body.route-focused #routeNotice{display:block}
 #routeNotice.bad{background:#fff4e3;color:#a05a0b;border-color:#efcb96}
+#routeBrief{font-size:11px;font-weight:750;color:#3964a0;margin-top:4px}
 body.sheet-compact #tag{font-size:9px;padding:5px 7px}
 @media(max-width:420px){.sheet .actions{gap:5px}.sheet .actions .demo{font-size:11px;padding:10px 8px}.sheet .actions .start{font-size:14px;padding:12px 9px}#fromGps{font-size:10px;padding:9px 7px}.tools{right:8px}.tools button{width:43px;height:43px}}
 </style>
@@ -134,7 +135,7 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
 <div id="routeNotice" role="status">Prowadzenie GPS • TEST</div>
 <div class="bottom">
   <div class="sheet">
-    <div class="line"><div><div class="eyebrow">SINOLUX • UK TRUCK ROUTING</div><div class="big" id="routeTitle">Lincoln → Birmingham</div></div><div class="sheetctl"><span class="status" id="tag">BRAK TRASY</span><button id="sheetToggle" title="Rozwiń lub zwiń szczegóły" aria-label="Rozwiń lub zwiń panel">⌃</button><button id="sheetClose" class="x" title="Ukryj panel" aria-label="Ukryj panel">×</button></div></div>
+    <div class="line"><div><div class="eyebrow">SINOLUX • UK TRUCK ROUTING</div><div class="big" id="routeTitle">Lincoln → Birmingham</div><div id="routeBrief">Wybierz trasę HGV</div></div><div class="sheetctl"><span class="status" id="tag">BRAK TRASY</span><button id="sheetToggle" title="Rozwiń lub zwiń szczegóły" aria-label="Rozwiń lub zwiń panel">⌃</button><button id="sheetClose" class="x" title="Ukryj panel" aria-label="Ukryj panel">×</button></div></div>
     <div id="speed"></div>
     <div id="message" role="status">Mapa jest gotowa. Wybierz „Szukaj trasy HGV”.</div>
     <div id="maneuver"><b id="turn">Następny manewr</b><small id="turnDist"></small></div>
@@ -211,9 +212,9 @@ body.sheet-compact #tag{font-size:9px;padding:5px 7px}
       coordinates=path;steps=instructions;drawRoute(path);setTag('HGV • TEST');
       $('routeTitle').textContent=startName+' → '+endName;
       const km=route.distance.toFixed(1),mins=Math.round(route.time/60);
-      tell(km+' km · '+mins+' min · wyznaczono trasę HGV. Nie zweryfikowano mostów i znaków. '+noDrive);
+      $('routeBrief').textContent=km+' km · '+mins+' min • HGV TEST';tell(km+' km · '+mins+' min · wyznaczono trasę HGV. Nie zweryfikowano mostów i znaków. '+noDrive);
       $('maneuver').style.display='block';$('turn').textContent=(steps[0]?.text)||'Trasa HGV';$('turnDist').textContent='Podgląd wskazówek · jeszcze bez GPS';
-    }catch(e){if(token!==routeToken)return;route=null;coordinates=[];steps=[];clearMap();setTag('BRAK TRASY');tell('Nie udało się znaleźć trasy HGV: '+e.message+' START jest niedostępny do czasu znalezienia trasy.');}
+    }catch(e){if(token!==routeToken)return;route=null;coordinates=[];steps=[];clearMap();setTag('BRAK TRASY');$('routeBrief').textContent='Nie udało się wyznaczyć trasy HGV';tell('Nie udało się znaleźć trasy HGV: '+e.message+' START jest niedostępny do czasu znalezienia trasy.');}
     finally{if(token===routeToken){busy=false;$('routebtn').disabled=false;}}
   }
   function speak(t){if(!('speechSynthesis' in window))return;try{window.speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(t);u.lang='pl-PL';u.rate=1;window.speechSynthesis.speak(u);}catch(e){}}
